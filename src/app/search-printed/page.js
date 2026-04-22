@@ -34,12 +34,8 @@ export default function BuscadorPage() {
     const [loadingCoords, setLoadingCoords] = useState(false);
     const [blocks, setBlocks] = useState([]);
     const [pagination, setPagination] = useState({ total: 0, currentPage: 1, lastPage: 1 });
-
-    // Control de la Lupa desde el buscador
     const [lupaEnabled, setLupaEnabled] = useState(true);
-
     const currentResult = selectedIndex !== null ? resultsList[selectedIndex] : null;
-
     const handleSearch = async (e, pageNumber = 1) => {
         if (e) e.preventDefault();
         if (!keyword.trim()) return;
@@ -54,6 +50,10 @@ export default function BuscadorPage() {
                     variables: { text: keyword, page: pageNumber, limit: 10, sort: "ASC", start: startDate || null, end: endDate || null },
                 }),
             });
+            if (!response.ok) {
+                console.log(`Error en la respuesta, no se pudo consultar en ${GRAPHQL_URL}`, response);
+                return;
+            }
             const json = await response.json();
             const resultKey = searchType === "word" ? "searchPrinted" : "searchPrintedPhrase";
             const result = json.data?.[resultKey];
@@ -67,11 +67,39 @@ export default function BuscadorPage() {
     useEffect(() => {
         if (!currentResult || !activeSearchTerm) return;
         setLoadingCoords(true);
+
+        let wordsToSearch = "";
+
+        if (searchType === "word") {
+            const regex = /<mark>(.*?)<\/mark>/gi;
+            const matches = [];
+            let match;
+            while ((match = regex.exec(currentResult.highlighted_content)) !== null) {
+                matches.push(match[1]);
+            }
+            wordsToSearch = matches.length > 0 ? [...new Set(matches)].join(" ") : activeSearchTerm;
+        } else {
+            const html = currentResult.highlighted_content;
+            const phraseRegex = /<mark>(.*?)<\/mark>(?:\s*<mark>(.*?)<\/mark>)*/gi;
+            const tempDiv = document.createElement("div");
+            tempDiv.innerHTML = html;
+            const marks = tempDiv.querySelectorAll("mark");
+
+            if (marks.length > 0) {
+                wordsToSearch = Array.from(marks)
+                    .map(m => m.textContent)
+                    .join(" ");
+            } else {
+                wordsToSearch = activeSearchTerm;
+            }
+        }
+
         const endpoint = searchType === "word" ? "/search/coordinates" : "/search/coordinates-line";
+
         fetch(`${REST_API_URL}${endpoint}`, {
             method: "POST",
             headers: { "Content-Type": "application/json" },
-            body: JSON.stringify({ ocr_coordinates: currentResult.ocr_coordinates, keyword: activeSearchTerm }),
+            body: JSON.stringify({ ocr_coordinates: currentResult.ocr_coordinates, keyword: wordsToSearch }),
         })
             .then(res => res.json())
             .then(data => {
@@ -122,7 +150,6 @@ export default function BuscadorPage() {
                         <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={styles.dateInput} />
                     </div>
 
-                    {/* Check de Lupa */}
                     <div style={{ display: "flex", alignItems: "center", gap: "8px", marginLeft: "auto" }}>
                         <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer", color: lupaEnabled ? "#ffcc00" : "#aaa", whiteSpace: "nowrap" }}>
                             <input type="checkbox" checked={lupaEnabled} onChange={(e) => setLupaEnabled(e.target.checked)} style={{ cursor: "pointer", accentColor: "#ffcc00" }} />
@@ -173,7 +200,7 @@ export default function BuscadorPage() {
                                 pdfUrl={pdfUrl}
                                 blocks={blocks}
                                 loadingCoords={loadingCoords}
-                                lupaEnabled={lupaEnabled} // Pasar prop al hijo
+                                lupaEnabled={lupaEnabled}
                             />
                         </div>
                     ) : (

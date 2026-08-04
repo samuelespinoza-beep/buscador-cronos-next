@@ -1,65 +1,298 @@
-import Image from "next/image";
+"use client";
+import { useState, useEffect } from "react";
+import dynamic from "next/dynamic";
 
-export default function Home() {
-  return (
-    <div className="flex min-h-screen items-center justify-center bg-zinc-50 font-sans dark:bg-black">
-      <main className="flex min-h-screen w-full max-w-3xl flex-col items-center justify-between py-32 px-16 bg-white dark:bg-black sm:items-start">
-        <Image
-          className="dark:invert"
-          src="/next.svg"
-          alt="Next.js logo"
-          width={100}
-          height={20}
-          priority
-        />
-        <div className="flex flex-col items-center gap-6 text-center sm:items-start sm:text-left">
-          <h1 className="max-w-xs text-3xl font-semibold leading-10 tracking-tight text-black dark:text-zinc-50">
-            To get started, edit the page.js file.
-          </h1>
-          <p className="max-w-md text-lg leading-8 text-zinc-600 dark:text-zinc-400">
-            Looking for a starting point or more instructions? Head over to{" "}
-            <a
-              href="https://vercel.com/templates?framework=next.js&utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Templates
-            </a>{" "}
-            or the{" "}
-            <a
-              href="https://nextjs.org/learn?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-              className="font-medium text-zinc-950 dark:text-zinc-50"
-            >
-              Learning
-            </a>{" "}
-            center.
-          </p>
+const PageViewer = dynamic(() => import("@/components/PageViewer"), { ssr: false });
+
+export default function BuscadorPage() {
+    const [keyword, setKeyword] = useState("");
+    const [activeSearchTerm, setActiveSearchTerm] = useState("");
+    const [searchType, setSearchType] = useState("word");
+    const [startDate, setStartDate] = useState("");
+    const [endDate, setEndDate] = useState("");
+    const [resultsList, setResultsList] = useState([]);
+    const [selectedIndex, setSelectedIndex] = useState(null);
+    const [loading, setLoading] = useState(false);
+    const [loadingCoords, setLoadingCoords] = useState(false);
+    const [blocks, setBlocks] = useState([]);
+    const [pagination, setPagination] = useState({ total: 0, currentPage: 1, lastPage: 1 });
+    const [lupaEnabled, setLupaEnabled] = useState(true);
+    const [searchError, setSearchError] = useState(null);
+    const currentResult = selectedIndex !== null ? resultsList[selectedIndex] : null;
+
+    const clearResults = () => {
+        setResultsList([]);
+        setPagination({ total: 0, currentPage: 1, lastPage: 1 });
+        setSelectedIndex(null);
+        setBlocks([]);
+    };
+
+    const handleSearch = async (e, pageNumber = 1) => {
+        if (e) e.preventDefault();
+        if (!keyword.trim()) return;
+        setActiveSearchTerm(keyword);
+        setLoading(true);
+        setSearchError(null);
+        try {
+            // Pasa por el route handler propio, que agrega el token del lado del servidor
+            // y traduce el modo a una de sus queries. Acá no hay ni token ni GraphQL.
+            const response = await fetch("/api/search", {
+                method: "POST",
+                headers: { "Content-Type": "application/json" },
+                body: JSON.stringify({
+                    mode: searchType,
+                    keyword,
+                    page: pageNumber,
+                    start: startDate || null,
+                    end: endDate || null,
+                }),
+            });
+
+            const json = await response.json().catch(() => null);
+
+            // El route handler ya distingue un backend caído de una query rechazada, y
+            // manda el motivo en "error" para poder mostrarlo tal cual.
+            if (!response.ok) {
+                throw new Error(json?.error || `El servidor respondió ${response.status}.`);
+            }
+
+            const result = json?.result;
+
+            if (!result) {
+                throw new Error("La respuesta del servidor no tiene el formato esperado.");
+            }
+
+            setResultsList(result.data || []);
+            setPagination({ total: result.total || 0, currentPage: result.current_page || 1, lastPage: result.last_page || 1 });
+            setSelectedIndex(null);
+            setBlocks([]);
+        } catch (error) {
+            console.error("Error al buscar:", error);
+            setSearchError(error.message);
+            // Los resultados de la búsqueda anterior se limpian: dejarlos en pantalla
+            // haría creer que son los del término que se acaba de escribir.
+            clearResults();
+        } finally {
+            setLoading(false);
+        }
+    };
+
+    useEffect(() => {
+        if (!currentResult || !activeSearchTerm) return;
+        setLoadingCoords(true);
+
+        let wordsToSearch = "";
+
+        if (searchType === "word") {
+            const regex = /<mark>(.*?)<\/mark>/gi;
+            const matches = [];
+            let match;
+            while ((match = regex.exec(currentResult.highlighted_content)) !== null) {
+                matches.push(match[1]);
+            }
+            wordsToSearch = matches.length > 0 ? [...new Set(matches)].join(" ") : activeSearchTerm;
+        } else {
+            const html = currentResult.highlighted_content;
+            const tempDiv = document.createElement("div");
+            tempDiv.innerHTML = html;
+            const marks = tempDiv.querySelectorAll("mark");
+
+            if (marks.length > 0) {
+                wordsToSearch = Array.from(marks)
+                    .map(m => m.textContent)
+                    .join(" ");
+            } else {
+                wordsToSearch = activeSearchTerm;
+            }
+        }
+
+        const controller = new AbortController();
+
+        // Pasa por el route handler propio, que agrega la API key del lado del servidor.
+        fetch("/api/coordinates", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ mode: searchType, ocr_coordinates: currentResult.ocr_coordinates, keyword: wordsToSearch }),
+            signal: controller.signal,
+        })
+            .then(res => res.json())
+            .then(data => {
+                if (data.status === "success" && data.coordinates) {
+                    setBlocks(data.coordinates.map(item => ({ x: item.geometria.Left, y: item.geometria.Top, w: item.geometria.Width, h: item.geometria.Height })));
+                } else {
+                    console.error("No se pudieron obtener las coordenadas", data);
+                    setBlocks([]);
+                }
+            })
+            .catch(error => {
+                if (controller.signal.aborted) return; // se cambió de página, no es un fallo
+                console.error("Error al obtener coordenadas:", error);
+                setBlocks([]);
+            })
+            .finally(() => {
+                // Si se abortó ya hay otra búsqueda en curso, y apagar el spinner acá lo
+                // dejaría oculto mientras esa sigue cargando.
+                if (!controller.signal.aborted) setLoadingCoords(false);
+            });
+
+        // Descarta la respuesta en vuelo al cambiar de resultado: si llegara tarde,
+        // pintaría las coordenadas de la página anterior sobre la nueva.
+        return () => controller.abort();
+    }, [currentResult, activeSearchTerm, searchType]);
+
+    // La imagen de página completa es el mismo archivo que el PDF pero sin comprimir:
+    // el ejemplar guarda "<pagina>_compress.pdf" junto a "<pagina>.jpg" en el bucket.
+    // No viene un campo con la URL de la imagen, hay que derivarla del nombre.
+    const imageUrl = currentResult?.document
+        ? currentResult.document.replace(/_compress\.pdf$/i, ".jpg")
+        : null;
+
+    const renderPageNumbers = () => {
+        const pages = [];
+        const { currentPage, lastPage } = pagination;
+        let startPage = Math.max(1, currentPage - 3);
+        let endPage = Math.min(lastPage, startPage + 6);
+        if (endPage - startPage < 6) startPage = Math.max(1, endPage - 6);
+
+        for (let i = startPage; i <= endPage; i++) {
+            pages.push(
+                <button key={i} onClick={() => handleSearch(null, i)}
+                    style={{ ...styles.pageNumberBtn, backgroundColor: i === currentPage ? "#ffcc00" : "#333", color: i === currentPage ? "black" : "white" }}>
+                    {i}
+                </button>
+            );
+        }
+        return pages;
+    };
+
+    return (
+        <div style={styles.container}>
+            <header style={styles.header}>
+                <h2>Buscador de Impresos Cronos</h2>
+                <form onSubmit={(e) => handleSearch(e, 1)} style={styles.searchForm}>
+                    <div style={styles.inputWrapper}>
+                        <input type="text" value={keyword} onChange={(e) => setKeyword(e.target.value)} placeholder="Buscar..." style={styles.input} />
+                        <select value={searchType} onChange={(e) => setSearchType(e.target.value)} style={styles.selectType}>
+                            <option value="word">Palabras</option>
+                            <option value="phrase">Frase Exacta</option>
+                        </select>
+                    </div>
+
+                    <div style={styles.dateGroup}>
+                        <label style={styles.dateLabel}>Desde:</label>
+                        <input type="date" value={startDate} onChange={(e) => setStartDate(e.target.value)} style={styles.dateInput} />
+                        <label style={styles.dateLabel}>Hasta:</label>
+                        <input type="date" value={endDate} onChange={(e) => setEndDate(e.target.value)} style={styles.dateInput} />
+                    </div>
+
+                    <div style={{ display: "flex", alignItems: "center", gap: "8px", marginLeft: "auto" }}>
+                        <label style={{ display: "flex", alignItems: "center", gap: "8px", fontSize: "12px", cursor: "pointer", color: lupaEnabled ? "#ffcc00" : "#aaa", whiteSpace: "nowrap" }}>
+                            <input type="checkbox" checked={lupaEnabled} onChange={(e) => setLupaEnabled(e.target.checked)} style={{ cursor: "pointer", accentColor: "#ffcc00" }} />
+                            Lupa Activa
+                        </label>
+                    </div>
+
+                    <button type="submit" style={styles.button} disabled={loading}>
+                        {loading ? "..." : "Buscar"}
+                    </button>
+                </form>
+            </header>
+
+            <div style={styles.mainContent}>
+                <aside style={styles.sidebar}>
+                    <h3>Resultados ({pagination.total})</h3>
+
+                    {searchError && (
+                        <div style={styles.errorBanner} role="alert">
+                            <strong>No se pudo completar la búsqueda</strong>
+                            <span style={styles.errorDetail}>{searchError}</span>
+                        </div>
+                    )}
+
+                    {/* Un mensaje explícito para distinguir "no hay coincidencias" de un
+                        fallo del backend, que antes se veían igual: la lista vacía. */}
+                    {!loading && !searchError && activeSearchTerm && resultsList.length === 0 && (
+                        <div style={styles.noResults}>Sin coincidencias para «{activeSearchTerm}».</div>
+                    )}
+
+                    <div style={styles.resultsScroll}>
+                        {resultsList.map((res, index) => (
+                            <div key={res._id || index} onClick={() => { setSelectedIndex(index); setBlocks([]); }}
+                                style={{ ...styles.resultCard, backgroundColor: selectedIndex === index ? "#444" : "#333", borderLeft: selectedIndex === index ? "4px solid #ffcc00" : "4px solid transparent" }}>
+                                {res.thumbnail && <img src={res.thumbnail} alt="Página" style={styles.thumbImg} />}
+                                <div style={{ flex: 1 }}>
+                                    <strong style={{ fontSize: "13px", display: "block" }}>{res.title}</strong>
+                                    <div style={{ display: "flex", justifyContent: "space-between", marginTop: "4px" }}>
+                                        <small style={{ color: "#ffcc00" }}>Pag: {res.page_number}</small>
+                                        <small style={{ color: "#888" }}>{res.date ? res.date.split("T")[0] : ""}</small>
+                                    </div>
+                                    <p style={styles.resultSnippet} dangerouslySetInnerHTML={{ __html: res.highlighted_content }} />
+                                </div>
+                            </div>
+                        ))}
+                    </div>
+                    {pagination.total > 0 && (
+                        <div style={styles.paginationContainer}>
+                            <button style={styles.pageNavBtn} disabled={pagination.currentPage === 1} onClick={() => handleSearch(null, 1)}>Primera</button>
+                            <button style={styles.pageNavBtn} disabled={pagination.currentPage === 1} onClick={() => handleSearch(null, pagination.currentPage - 1)}>«</button>
+                            {renderPageNumbers()}
+                            <button style={styles.pageNavBtn} disabled={pagination.currentPage === pagination.lastPage} onClick={() => handleSearch(null, pagination.currentPage + 1)}>»</button>
+                        </div>
+                    )}
+                </aside>
+
+                <main style={styles.viewerContainer}>
+                    {currentResult ? (
+                        <div style={styles.viewerLayout}>
+                            <div style={styles.toolbar}>
+                                <span style={styles.toolbarTitle}>{currentResult.title} - Página {currentResult.page_number}</span>
+                            </div>
+                            <div style={styles.pageWrapper}>
+                                <PageViewer
+                                    key={imageUrl}
+                                    imageUrl={imageUrl}
+                                    blocks={blocks}
+                                    loadingCoords={loadingCoords}
+                                    lupaEnabled={lupaEnabled}
+                                />
+                            </div>
+                        </div>
+                    ) : (
+                        !loading && <div style={styles.emptyState}>Seleccione un ejemplar para visualizar</div>
+                    )}
+                </main>
+            </div>
         </div>
-        <div className="flex flex-col gap-4 text-base font-medium sm:flex-row">
-          <a
-            className="flex h-12 w-full items-center justify-center gap-2 rounded-full bg-foreground px-5 text-background transition-colors hover:bg-[#383838] dark:hover:bg-[#ccc] md:w-[158px]"
-            href="https://vercel.com/new?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            <Image
-              className="dark:invert"
-              src="/vercel.svg"
-              alt="Vercel logomark"
-              width={16}
-              height={16}
-            />
-            Deploy Now
-          </a>
-          <a
-            className="flex h-12 w-full items-center justify-center rounded-full border border-solid border-black/[.08] px-5 transition-colors hover:border-transparent hover:bg-black/[.04] dark:border-white/[.145] dark:hover:bg-[#1a1a1a] md:w-[158px]"
-            href="https://nextjs.org/docs?utm_source=create-next-app&utm_medium=appdir-template-tw&utm_campaign=create-next-app"
-            target="_blank"
-            rel="noopener noreferrer"
-          >
-            Documentation
-          </a>
-        </div>
-      </main>
-    </div>
-  );
+    );
 }
+
+const styles = {
+    container: { padding: "10px", backgroundColor: "#121212", minHeight: "100vh", color: "white", fontFamily: "'Segoe UI', Roboto, sans-serif", display: "flex", flexDirection: "column" },
+    header: { borderBottom: "1px solid #333", paddingBottom: "15px", marginBottom: "15px" },
+    searchForm: { display: "flex", gap: "10px", alignItems: "center", flexWrap: "wrap" },
+    inputWrapper: { display: "flex", backgroundColor: "#222", borderRadius: "4px", border: "1px solid #444", overflow: "hidden", flex: "0 1 450px", minWidth: "280px" },
+    input: { padding: "10px 15px", width: "100%", border: "none", backgroundColor: "transparent", color: "white", outline: "none" },
+    selectType: { padding: "0 10px", backgroundColor: "#333", color: "#ffcc00", border: "none", borderLeft: "1px solid #444", outline: "none", cursor: "pointer", fontSize: "12px", fontWeight: "bold" },
+    dateGroup: { display: "flex", alignItems: "center", gap: "8px", backgroundColor: "#222", padding: "8px 12px", borderRadius: "4px", border: "1px solid #444", flexWrap: "wrap" },
+    dateLabel: { fontSize: "10px", color: "#aaa", textTransform: "uppercase", fontWeight: "bold" },
+    dateInput: { backgroundColor: "transparent", border: "none", color: "white", fontSize: "12px", outline: "none", cursor: "pointer" },
+    button: { padding: "10px 25px", backgroundColor: "#ffcc00", color: "black", fontWeight: "900", border: "none", borderRadius: "4px", cursor: "pointer", textTransform: "uppercase", transition: "0.2s" },
+    mainContent: { display: "flex", gap: "20px", flex: 1, flexWrap: "wrap" },
+    sidebar: { flex: "0 1 450px", maxWidth: "100%", display: "flex", flexDirection: "column", backgroundColor: "#1e1e1e", borderRadius: "8px", padding: "15px", border: "1px solid #333", maxHeight: "85vh", boxSizing: "border-box" },
+    resultsScroll: { overflowY: "auto", flex: 1, marginTop: "10px", paddingRight: "5px" },
+    resultCard: { padding: "12px", marginBottom: "12px", cursor: "pointer", borderRadius: "8px", transition: "0.2s", display: "flex", gap: "10px", alignItems: "start" },
+    thumbImg: { width: "60px", height: "85px", objectFit: "cover", borderRadius: "4px" },
+    resultSnippet: { fontSize: "11px", color: "#aaa", marginTop: "8px", lineHeight: "1.3" },
+    errorBanner: { display: "flex", flexDirection: "column", gap: "4px", marginTop: "10px", padding: "10px 12px", backgroundColor: "#3a1d1d", border: "1px solid #7f2c2c", borderRadius: "6px", fontSize: "12px", color: "#ffb3b3" },
+    errorDetail: { fontSize: "11px", color: "#e08e8e" },
+    noResults: { marginTop: "16px", fontSize: "12px", color: "#888", fontStyle: "italic", textAlign: "center" },
+    viewerContainer: { flex: "1 1 600px", display: "flex", justifyContent: "center", alignItems: "flex-start", backgroundColor: "#090909", padding: "10px", borderRadius: "8px", overflow: "auto", border: "1px solid #333", minHeight: "500px" },
+    pageWrapper: { boxShadow: "0 10px 30px rgba(0,0,0,0.8)", backgroundColor: "white", maxWidth: "100%" },
+    emptyState: { color: "#444", alignSelf: "center", fontSize: "1rem", fontStyle: "italic", textAlign: "center", padding: "20px" },
+    paginationContainer: { display: "flex", justifyContent: "center", alignItems: "center", gap: "5px", marginTop: "10px", paddingTop: "10px", borderTop: "1px solid #333", flexWrap: "wrap" },
+    pageNumberBtn: { padding: "6px 10px", border: "1px solid #444", borderRadius: "4px", cursor: "pointer", fontSize: "11px" },
+    pageNavBtn: { backgroundColor: "transparent", color: "#ffcc00", border: "none", cursor: "pointer", fontSize: "16px", fontWeight: "bold" },
+    viewerLayout: { display: "flex", flexDirection: "column", gap: "10px", width: "100%", alignItems: "center" },
+    toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", maxWidth: "1100px", padding: "10px 15px", backgroundColor: "#1e1e1e", borderRadius: "6px", border: "1px solid #333", boxSizing: "border-box" },
+    toolbarTitle: { fontSize: "14px", fontWeight: "bold", color: "#ffcc00" },
+};

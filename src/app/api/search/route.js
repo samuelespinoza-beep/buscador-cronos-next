@@ -1,18 +1,7 @@
 import { NextResponse } from 'next/server';
 
-// Reenvía las búsquedas al GraphQL de cronos-printed agregando el token del lado del
-// servidor. Antes la página lo llamaba directo con NEXT_PUBLIC_TOKEN_ID, y ese prefijo
-// hace que Next escriba el valor dentro del bundle: quedaba legible con Ver código
-// fuente. Acá el token nunca sale del servidor.
+const backendUrl = () => process.env.PRINTED_GRAPHQL_URL?.replace(/\/+$/, '');
 
-const isProd = process.env.NODE_ENV === 'production';
-
-const BACKEND_URL = (process.env.PRINTED_GRAPHQL_URL
-    || (isProd ? 'https://cronosprintedapi.glr.pe/graphql' : 'http://cronosprintedapi.glr.test/graphql')
-).replace(/\/+$/, '');
-
-// El cliente manda un modo, no una query: así no puede pedirle al backend nada que no
-// esté declarado acá. Cada modo trae el nombre del campo con el que responde GraphQL.
 const SEARCHES = {
     word: {
         field: 'searchPrinted',
@@ -38,14 +27,22 @@ const RESULTS_PER_PAGE = 10;
 const SORT = 'ASC';
 const TIMEOUT_MS = 20000;
 
-// Lo que llega de un <input type="date">: vacío o YYYY-MM-DD.
+// El backend pagina por offset y el costo crece con la profundidad. Medido contra él:
+// page 1 y 50 -> 0,5s | page 200 -> 1,3s | page 1000 -> 5,3s | page 3000 -> pasa de 20s.
+// De ahí la cota: 1000 es la última profundidad que responde, y son 10.000 resultados de
+// alcance. Más arriba la consulta ya no termina, así que permitirlo sólo regala trabajo
+// caro al backend. Para el abuso repetido hace falta rate limiting, no una cota.
+const MAX_PAGE = 1000;
+const MAX_KEYWORD_LENGTH = 200;
+
 const isDate = (value) => value === null || /^\d{4}-\d{2}-\d{2}$/.test(value);
 
 export async function POST(request) {
+    const backend = backendUrl();
     const tokenId = process.env.PRINTED_TOKEN_ID;
 
-    if (!tokenId) {
-        console.error('Falta PRINTED_TOKEN_ID en el entorno');
+    if (!backend || !tokenId) {
+        console.error('Falta PRINTED_GRAPHQL_URL o PRINTED_TOKEN_ID en el entorno');
         return NextResponse.json({ error: 'Buscador mal configurado.' }, { status: 503 });
     }
 
@@ -63,12 +60,16 @@ export async function POST(request) {
         return NextResponse.json({ error: 'Parámetros incompletos.' }, { status: 400 });
     }
 
-    if (!Number.isInteger(page) || page < 1 || !isDate(start) || !isDate(end)) {
+    if (keyword.length > MAX_KEYWORD_LENGTH) {
+        return NextResponse.json({ error: 'La búsqueda es demasiado larga.' }, { status: 400 });
+    }
+
+    if (!Number.isInteger(page) || page < 1 || page > MAX_PAGE || !isDate(start) || !isDate(end)) {
         return NextResponse.json({ error: 'Parámetros inválidos.' }, { status: 400 });
     }
 
     try {
-        const response = await fetch(BACKEND_URL, {
+        const response = await fetch(backend, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
@@ -83,21 +84,24 @@ export async function POST(request) {
             signal: AbortSignal.timeout(TIMEOUT_MS),
         });
 
+        // Los mensajes de error del backend se quedan en el log y nunca viajan al
+        // navegador: un error de GraphQL puede traer nombres de tablas, rutas de archivos
+        // o fragmentos de consulta. Al cliente va un texto fijo, distinto por caso para
+        // que sirva de pista al dar soporte, pero sin detalles internos.
         if (!response.ok) {
             console.error(`El buscador respondió ${response.status}`);
             return NextResponse.json(
-                { error: `El buscador respondió ${response.status}.` },
+                { error: 'No se pudo consultar el buscador.' },
                 { status: response.status },
             );
         }
 
         const json = await response.json().catch(() => null);
 
-        // GraphQL contesta 200 aunque la query falle: el detalle viene en "errors".
         if (json?.errors?.length) {
             console.error('El buscador devolvió errores', json.errors);
             return NextResponse.json(
-                { error: json.errors[0]?.message || 'La consulta fue rechazada por el buscador.' },
+                { error: 'La consulta fue rechazada por el buscador.' },
                 { status: 502 },
             );
         }

@@ -1,6 +1,7 @@
 "use client";
 import { useState, useEffect } from "react";
 import dynamic from "next/dynamic";
+import { splitHighlights, extractMarks } from "@/lib/highlights";
 
 const PageViewer = dynamic(() => import("@/components/PageViewer"), { ssr: false });
 
@@ -18,7 +19,14 @@ export default function BuscadorPage() {
     const [pagination, setPagination] = useState({ total: 0, currentPage: 1, lastPage: 1 });
     const [lupaEnabled, setLupaEnabled] = useState(true);
     const [searchError, setSearchError] = useState(null);
+    const [coordsMessage, setCoordsMessage] = useState(null);
     const currentResult = selectedIndex !== null ? resultsList[selectedIndex] : null;
+
+    const selectResult = (index) => {
+        setSelectedIndex(index);
+        setBlocks([]);
+        setCoordsMessage(null);
+    };
 
     const clearResults = () => {
         setResultsList([]);
@@ -80,31 +88,14 @@ export default function BuscadorPage() {
     useEffect(() => {
         if (!currentResult || !activeSearchTerm) return;
         setLoadingCoords(true);
+        setCoordsMessage(null);
 
-        let wordsToSearch = "";
-
-        if (searchType === "word") {
-            const regex = /<mark>(.*?)<\/mark>/gi;
-            const matches = [];
-            let match;
-            while ((match = regex.exec(currentResult.highlighted_content)) !== null) {
-                matches.push(match[1]);
-            }
-            wordsToSearch = matches.length > 0 ? [...new Set(matches)].join(" ") : activeSearchTerm;
-        } else {
-            const html = currentResult.highlighted_content;
-            const tempDiv = document.createElement("div");
-            tempDiv.innerHTML = html;
-            const marks = tempDiv.querySelectorAll("mark");
-
-            if (marks.length > 0) {
-                wordsToSearch = Array.from(marks)
-                    .map(m => m.textContent)
-                    .join(" ");
-            } else {
-                wordsToSearch = activeSearchTerm;
-            }
-        }
+        // Por palabras se buscan los términos distintos; por frase, la secuencia completa
+        // en el orden en que aparece. Antes esta rama usaba innerHTML sobre un div suelto
+        // para leer los <mark>; ahora sale del mismo parseo que usa el render.
+        const marks = extractMarks(currentResult.highlighted_content);
+        const words = searchType === "word" ? [...new Set(marks)] : marks;
+        const wordsToSearch = words.length > 0 ? words.join(" ") : activeSearchTerm;
 
         const controller = new AbortController();
 
@@ -115,19 +106,27 @@ export default function BuscadorPage() {
             body: JSON.stringify({ mode: searchType, ocr_coordinates: currentResult.ocr_coordinates, keyword: wordsToSearch }),
             signal: controller.signal,
         })
-            .then(res => res.json())
-            .then(data => {
-                if (data.status === "success" && data.coordinates) {
+            .then(res => res.json().then(data => ({ ok: res.ok, data })))
+            .then(({ ok, data }) => {
+                // Que el servicio falle y que la palabra no esté en la imagen se veían
+                // igual —sin recuadros y sin explicación—, así que se distinguen.
+                if (ok && data?.status === "success" && Array.isArray(data.coordinates)) {
                     setBlocks(data.coordinates.map(item => ({ x: item.geometria.Left, y: item.geometria.Top, w: item.geometria.Width, h: item.geometria.Height })));
-                } else {
-                    console.error("No se pudieron obtener las coordenadas", data);
-                    setBlocks([]);
+                    if (data.coordinates.length === 0) {
+                        setCoordsMessage("No se ubicaron las coincidencias en esta imagen");
+                    }
+                    return;
                 }
+
+                console.error("No se pudieron obtener las coordenadas", data);
+                setBlocks([]);
+                setCoordsMessage("No se pudo resaltar las coincidencias");
             })
             .catch(error => {
                 if (controller.signal.aborted) return; // se cambió de página, no es un fallo
                 console.error("Error al obtener coordenadas:", error);
                 setBlocks([]);
+                setCoordsMessage("No se pudo resaltar las coincidencias");
             })
             .finally(() => {
                 // Si se abortó ya hay otra búsqueda en curso, y apagar el spinner acá lo
@@ -215,18 +214,34 @@ export default function BuscadorPage() {
                         <div style={styles.noResults}>Sin coincidencias para «{activeSearchTerm}».</div>
                     )}
 
-                    <div style={styles.resultsScroll}>
+                    {/* listbox/option en vez de divs: así los resultados se recorren con Tab
+                        y se abren con Enter o Espacio, sin necesidad de mouse. */}
+                    <div style={styles.resultsScroll} role="listbox" aria-label="Resultados de la búsqueda">
                         {resultsList.map((res, index) => (
-                            <div key={res._id || index} onClick={() => { setSelectedIndex(index); setBlocks([]); }}
+                            <div key={res._id || index}
+                                role="option"
+                                aria-selected={selectedIndex === index}
+                                tabIndex={0}
+                                onClick={() => selectResult(index)}
+                                onKeyDown={(e) => {
+                                    if (e.key === "Enter" || e.key === " ") {
+                                        e.preventDefault();
+                                        selectResult(index);
+                                    }
+                                }}
                                 style={{ ...styles.resultCard, backgroundColor: selectedIndex === index ? "#444" : "#333", borderLeft: selectedIndex === index ? "4px solid #ffcc00" : "4px solid transparent" }}>
-                                {res.thumbnail && <img src={res.thumbnail} alt="Página" style={styles.thumbImg} />}
+                                {res.thumbnail && <img src={res.thumbnail} alt="Página" style={styles.thumbImg} loading="lazy" decoding="async" />}
                                 <div style={{ flex: 1 }}>
                                     <strong style={{ fontSize: "13px", display: "block" }}>{res.title}</strong>
                                     <div style={{ display: "flex", justifyContent: "space-between", marginTop: "4px" }}>
                                         <small style={{ color: "#ffcc00" }}>Pag: {res.page_number}</small>
                                         <small style={{ color: "#888" }}>{res.date ? res.date.split("T")[0] : ""}</small>
                                     </div>
-                                    <p style={styles.resultSnippet} dangerouslySetInnerHTML={{ __html: res.highlighted_content }} />
+                                    <p style={styles.resultSnippet}>
+                                        {splitHighlights(res.highlighted_content).map((segment, i) => (
+                                            segment.mark ? <mark key={i}>{segment.text}</mark> : segment.text
+                                        ))}
+                                    </p>
                                 </div>
                             </div>
                         ))}
@@ -246,6 +261,7 @@ export default function BuscadorPage() {
                         <div style={styles.viewerLayout}>
                             <div style={styles.toolbar}>
                                 <span style={styles.toolbarTitle}>{currentResult.title} - Página {currentResult.page_number}</span>
+                                {coordsMessage && <span style={styles.coordsMessage} role="status">{coordsMessage}</span>}
                             </div>
                             <div style={styles.pageWrapper}>
                                 <PageViewer
@@ -295,4 +311,5 @@ const styles = {
     viewerLayout: { display: "flex", flexDirection: "column", gap: "10px", width: "100%", alignItems: "center" },
     toolbar: { display: "flex", justifyContent: "space-between", alignItems: "center", width: "100%", maxWidth: "1100px", padding: "10px 15px", backgroundColor: "#1e1e1e", borderRadius: "6px", border: "1px solid #333", boxSizing: "border-box" },
     toolbarTitle: { fontSize: "14px", fontWeight: "bold", color: "#ffcc00" },
+    coordsMessage: { fontSize: "11px", color: "#e08e8e", fontStyle: "italic", paddingLeft: "12px", textAlign: "right" },
 };

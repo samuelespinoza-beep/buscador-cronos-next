@@ -1,16 +1,7 @@
 import { NextResponse } from 'next/server';
 
-// Reenvía la búsqueda de coordenadas a cronos-printed agregando la API key. Corre en
-// el servidor a propósito: así la key nunca llega al navegador (una env con prefijo
-// NEXT_PUBLIC_ queda inlineada en el bundle y la puede leer cualquiera).
+const backendUrl = () => process.env.PRINTED_REST_API_URL?.replace(/\/+$/, '');
 
-const isProd = process.env.NODE_ENV === 'production';
-
-const BACKEND_URL = (process.env.PRINTED_REST_API_URL
-    || (isProd ? 'https://cronosprinted.glr.pe/api' : 'http://cronosprinted.glr.test/api')
-).replace(/\/+$/, '');
-
-// El modo se traduce acá contra una lista fija: el cliente no elige el path del backend.
 const ENDPOINTS = {
     word: '/search/coordinates',
     phrase: '/search/coordinates-line',
@@ -18,11 +9,36 @@ const ENDPOINTS = {
 
 const TIMEOUT_MS = 20000;
 
+// El backend descarga la URL que le pasemos en ocr_coordinates, así que este endpoint es
+// un relevo: sin filtro, cualquiera podría pedirle que busque en un host arbitrario. Hoy
+// el backend también valida, pero eso es un control ajeno que podría relajarse.
+// Es la misma validación que tenía el pdf-proxy antes de eliminarse.
+// ".test" es un TLD reservado por el estándar, no puede apuntar a nada público.
+const isAllowedHost = (hostname) =>
+    hostname === 's3.amazonaws.com'
+    || hostname.endsWith('.s3.amazonaws.com')
+    || hostname.endsWith('.glr.pe')
+    || hostname.endsWith('.glr.test');
+
+const isAllowedUrl = (value) => {
+    if (typeof value !== 'string') return false;
+
+    let url;
+    try {
+        url = new URL(value);
+    } catch {
+        return false;
+    }
+
+    return (url.protocol === 'https:' || url.protocol === 'http:') && isAllowedHost(url.hostname);
+};
+
 export async function POST(request) {
+    const backend = backendUrl();
     const apiKey = process.env.PRINTED_SEARCH_API_KEY;
 
-    if (!apiKey) {
-        console.error('Falta PRINTED_SEARCH_API_KEY en el entorno');
+    if (!backend || !apiKey) {
+        console.error('Falta PRINTED_REST_API_URL o PRINTED_SEARCH_API_KEY en el entorno');
         return NextResponse.json({ error: 'Buscador mal configurado' }, { status: 503 });
     }
 
@@ -40,8 +56,13 @@ export async function POST(request) {
         return NextResponse.json({ error: 'Parámetros incompletos' }, { status: 400 });
     }
 
+    if (!isAllowedUrl(ocrCoordinates)) {
+        console.error('ocr_coordinates apunta a un host no permitido:', ocrCoordinates);
+        return NextResponse.json({ error: 'Origen no permitido' }, { status: 400 });
+    }
+
     try {
-        const response = await fetch(`${BACKEND_URL}${endpoint}`, {
+        const response = await fetch(`${backend}${endpoint}`, {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',

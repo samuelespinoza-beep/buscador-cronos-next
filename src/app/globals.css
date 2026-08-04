@@ -1,13 +1,74 @@
-@import "tailwindcss";
+/* Reset mínimo. Reemplaza al preflight de Tailwind, que era lo único que Tailwind
+   aportaba al proyecto: no hay una sola clase de utilidad en el código. Estas reglas no
+   son decorativas — la maquetación del buscador las da por sentadas, y sin ellas los
+   títulos, los controles y las imágenes cambian de aspecto. */
+
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+  margin: 0;
+  padding: 0;
+  border: 0 solid;
+}
+
+html {
+  line-height: 1.5;
+  tab-size: 4;
+  -webkit-text-size-adjust: 100%;
+  text-size-adjust: 100%;
+}
+
+/* Los títulos heredan tamaño y peso: el buscador los estiliza por su cuenta. */
+h1,
+h2,
+h3,
+h4,
+h5,
+h6 {
+  font-size: inherit;
+  font-weight: inherit;
+}
+
+small {
+  font-size: 80%;
+}
+
+img,
+svg,
+video,
+canvas {
+  display: block;
+  vertical-align: middle;
+}
+
+img,
+video {
+  max-width: 100%;
+  height: auto;
+}
+
+/* Sin esto los controles usan la tipografía del sistema en vez de la de la página. */
+button,
+input,
+select,
+optgroup,
+textarea {
+  font: inherit;
+  color: inherit;
+  letter-spacing: inherit;
+  background-color: transparent;
+  border-radius: 0;
+}
+
+button,
+input:where([type="button"], [type="reset"], [type="submit"]) {
+  appearance: button;
+}
 
 :root {
   --background: #ffffff;
   --foreground: #171717;
-}
-
-@theme inline {
-  --color-background: var(--background);
-  --color-foreground: var(--foreground);
 }
 
 @media (prefers-color-scheme: dark) {
@@ -21,6 +82,15 @@ body {
   background: var(--background);
   color: var(--foreground);
   font-family: Arial, Helvetica, sans-serif;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* Los estilos en línea de React no pueden expresar :focus-visible, y sin un indicador
+   de foco la navegación por teclado de los resultados es invisible. */
+[role="option"]:focus-visible {
+  outline: 2px solid #ffcc00;
+  outline-offset: 2px;
 }
 
 @keyframes spin {
